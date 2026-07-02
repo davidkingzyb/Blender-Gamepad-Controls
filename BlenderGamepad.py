@@ -12,21 +12,52 @@ import bpy
 import mathutils
 import threading
 import time
+import math
 from bpy.types import Operator, Panel, PropertyGroup
 from bpy.props import FloatProperty, PointerProperty, BoolProperty
+import ctypes
+from ctypes import windll, Structure, c_long, byref
+
+
+class POINT(Structure):
+    _fields_ = [("x", c_long), ("y", c_long)]
+
+def get_mouse_position():
+    pt = POINT()
+    windll.user32.GetCursorPos(byref(pt))
+    return pt.x, pt.y
+
+def get_pixel_color_win(x, y):
+    hdc = ctypes.windll.user32.GetDC(0)
+    color = ctypes.windll.gdi32.GetPixel(hdc, x, y)
+    ctypes.windll.user32.ReleaseDC(0, hdc)
+    
+    r = color & 0xFF
+    g = (color >> 8) & 0xFF
+    b = (color >> 16) & 0xFF
+    return (r, g, b)
 
 # 动态检测函数
 def check_gamepad_available():
     try:
-        from inputs import get_gamepad
+        from .utils import get_gamepad
         # 尝试获取手柄事件，如果没有手柄会抛出异常
         events = get_gamepad()
         return True
     except:
         return False
 
-from bpy_extras import view3d_utils
-
+def focus_view_to_origin():
+    # 遍历当前窗口所有区域，寻找 3D 视图
+    for area in bpy.context.screen.areas:
+        if area.type == 'VIEW_3D':
+            space = area.spaces.active
+            if space.type == 'VIEW_3D':
+                # 将视图焦点移动到世界坐标原点 (0, 0, 0)
+                space.region_3d.view_location = (0.0, 0.0, 0.0)
+                print("视图已聚焦到原点。")
+                return
+    print("未找到活动的 3D 视图窗口。")
 
 # 手柄状态类
 class GamepadState:
@@ -41,6 +72,8 @@ class GamepadState:
         self.dpad_down = 0
         self.dpad_left = 0
         self.dpad_right = 0
+        self.lb=0
+        self.rb=0
 
 gamepad_state = GamepadState()
 
@@ -57,7 +90,7 @@ class GamepadThread(threading.Thread):
     def run(self):
         while self.running:
             try:
-                from inputs import get_gamepad
+                from .utils import get_gamepad
                 events = get_gamepad()
                 # 成功获取事件，重置错误计数
                 self._consecutive_errors = 0
@@ -87,6 +120,7 @@ class GamepadThread(threading.Thread):
 
     def process_event(self, event):
         """处理手柄事件"""
+        # print(event.ev_type, event.code, event.state)
         if event.code == 'ABS_X':
             gamepad_state.left_stick_x = event.state / 32768.0
         elif event.code == 'ABS_Y':
@@ -115,7 +149,18 @@ class GamepadThread(threading.Thread):
             else:
                 gamepad_state.dpad_left = 0
                 gamepad_state.dpad_right = 0
-        elif event.code.startswith('BTN_'):
+        elif event.code=='ABS_RZ':
+            if(event.state==255):
+                gamepad_state.rb=1
+            else:
+                gamepad_state.rb=0
+        elif event.code=='ABS_Z':
+            if(event.state==255):
+                gamepad_state.lb=1
+            else:
+                gamepad_state.lb=0
+        elif event.code.startswith('BTN_'):# WEST EAST NORTH SOUTH START SELECT TL TR THUMBL
+            # print('btn event code',event.code)
             gamepad_state.buttons[event.code] = event.state
             gamepad_state.button_states[event.code] = event.state
 
@@ -138,30 +183,9 @@ class GamepadSettings(PropertyGroup):
     zoom_speed: FloatProperty(
         name="缩放速度",
         description="视角缩放的速度",
-        default=0.5,
+        default=0.1,
         min=0.1,
         max=2.0
-    )
-    scale_speed: FloatProperty(
-        name="物体缩放速度",
-        description="物体缩放的速度",
-        default=0.05,
-        min=0.01,
-        max=0.5
-    )
-    move_speed: FloatProperty(
-        name="物体移动速度",
-        description="物体移动的速度",
-        default=0.1,
-        min=0.01,
-        max=1.0
-    )
-    object_rotation_speed: FloatProperty(
-        name="物体旋转速度",
-        description="物体旋转的速度",
-        default=0.05,
-        min=0.01,
-        max=1.0
     )
     invert_x_axis: BoolProperty(
         name="反转X轴",
@@ -206,6 +230,7 @@ class GAMEPAD_OT_control(Operator):
     _last_error_message = None  # 上一次错误消息
 
     def modal(self, context, event):
+        print('[gamepad] modal')
         settings = context.scene.gamepad_settings
 
         # 检查线程状态
@@ -244,178 +269,189 @@ class GAMEPAD_OT_control(Operator):
             return {'CANCELLED'}
 
         if event.type == 'TIMER':
-            view3d = context.space_data.region_3d
-            settings = context.scene.gamepad_settings
-
-            self.handle_button_actions(context)
-
-            if context.active_object and context.active_object.select_get():
-                obj = context.active_object
-
-                if abs(gamepad_state.left_stick_x) > 0.1 or abs(gamepad_state.left_stick_y) > 0.1:
-                    move_speed = settings.move_speed
-                    dx = gamepad_state.left_stick_x * move_speed
-                    dy = -gamepad_state.left_stick_y * move_speed
-
-                    if settings.invert_x_axis:
-                        dx = -dx
-                    if not settings.invert_y_axis:
-                        dy = -dy
-
-                    move_vector = mathutils.Vector((dx, dy, 0.0))
-                    move_vector = view3d.view_rotation @ move_vector
-                    obj.location += move_vector
-
-                    obj.location = obj.location.copy()
-                    obj.keyframe_insert(data_path='location', group="Location")
-
-                if abs(gamepad_state.right_stick_x) > 0.1 or abs(gamepad_state.right_stick_y) > 0.1:
-                    rot_speed = settings.object_rotation_speed
-
-                    delta_rot_x = -gamepad_state.right_stick_y * rot_speed
-                    delta_rot_z = -gamepad_state.right_stick_x * rot_speed
-
-                    if settings.invert_x_axis:
-                        delta_rot_x = -delta_rot_x
-                    if settings.invert_z_axis:
-                        delta_rot_z = -delta_rot_z
-
-                    rot_euler = mathutils.Euler((delta_rot_x, 0, delta_rot_z), 'XYZ')
-                    obj.rotation_euler.rotate(rot_euler)
-
-                    obj.rotation_euler = obj.rotation_euler.copy()
-                    obj.keyframe_insert(data_path='rotation_euler', group="Rotation")
-
-                scale_speed = settings.scale_speed
-
-                if gamepad_state.buttons.get('BTN_SOUTH'):
-                    factor = 1.0 - scale_speed
-                    obj.scale *= factor
-                    obj.scale = obj.scale.copy()
-                    obj.keyframe_insert(data_path='scale', group="Scale")
-                if gamepad_state.buttons.get('BTN_EAST'):
-                    factor = 1.0 + scale_speed
-                    obj.scale *= factor
-                    obj.scale = obj.scale.copy()
-                    obj.keyframe_insert(data_path='scale', group="Scale")
-
-                obj.update_tag()
-                context.view_layer.update()
-
-            else:
-                if abs(gamepad_state.left_stick_x) > 0.1 or abs(gamepad_state.left_stick_y) > 0.1:
-                    pan_speed = settings.pan_speed
-                    dx = gamepad_state.left_stick_x * pan_speed
-                    dy = -gamepad_state.left_stick_y * pan_speed
-
-                    if settings.invert_x_axis:
-                        dx = -dx
-                    if not settings.invert_y_axis:
-                        dy = -dy
-
-                    view3d.view_location += view3d.view_rotation @ mathutils.Vector((dx, dy, 0.0))
-
-                if abs(gamepad_state.right_stick_x) > 0.1 or abs(gamepad_state.right_stick_y) > 0.1:
-                    rot_speed = settings.rotation_speed
-                    euler = view3d.view_rotation.to_euler()
-
-                    delta_euler_z = gamepad_state.right_stick_x * rot_speed
-                    delta_euler_x = gamepad_state.right_stick_y * rot_speed
-
-                    if settings.invert_z_axis:
-                        delta_euler_z = -delta_euler_z
-                    if settings.invert_x_axis:
-                        delta_euler_x = -delta_euler_x
-
-                    euler.z += delta_euler_z
-                    euler.x += delta_euler_x
-                    view3d.view_rotation = euler.to_quaternion()
-
-                zoom_speed = settings.zoom_speed
-                if gamepad_state.buttons.get('BTN_SOUTH'):
-                    view3d.view_distance += zoom_speed
-                if gamepad_state.buttons.get('BTN_EAST'):
-                    view3d.view_distance -= zoom_speed
-
+            try:
+                self.handle_button_brush(context)
+                self.handle_button_actions(context)
                 self.handle_dpad_view_switch(context)
-
-            context.area.tag_redraw()
-
-            return {'RUNNING_MODAL'}  # 改为 RUNNING_MODAL 以确保持续运行
+                self.handle_view3d(context)
+                context.area.tag_redraw()
+                return {'RUNNING_MODAL'}  # 改为 RUNNING_MODAL 以确保持续运行
+            except Exception as err:
+                print('[gamepad] OT timer err',err)
+                settings.enable_gamepad_control = False
+                self.cancel(context)
+                return {'CANCELLED'}
 
         elif event.type == 'ESC':
             self.cancel(context)
             return {'CANCELLED'}
 
         return {'PASS_THROUGH'}
+    
+    def handle_view3d(self,context):
+        view3d = context.space_data.region_3d
+        settings = context.scene.gamepad_settings
+        #视角平移
+        if abs(gamepad_state.right_stick_x) > 0.1 or abs(gamepad_state.right_stick_y) > 0.1:
+            pan_speed = settings.pan_speed
+            dx = gamepad_state.right_stick_x * pan_speed
+            dy = -gamepad_state.right_stick_y * pan_speed
 
+            if settings.invert_x_axis:
+                dx = -dx
+            if not settings.invert_y_axis:
+                dy = -dy
+
+            view3d.view_location += view3d.view_rotation @ mathutils.Vector((-dy, dx, 0.0))
+        #视角旋转
+        if abs(gamepad_state.left_stick_x) > 0.1 or abs(gamepad_state.left_stick_y) > 0.1:
+            rot_speed = settings.rotation_speed
+            euler = view3d.view_rotation.to_euler()
+
+            delta_euler_z = gamepad_state.left_stick_x * rot_speed
+            delta_euler_x = gamepad_state.left_stick_y * rot_speed
+
+            if settings.invert_z_axis:
+                delta_euler_z = -delta_euler_z
+            if settings.invert_x_axis:
+                delta_euler_x = -delta_euler_x
+            euler.z += delta_euler_x
+            euler.x += delta_euler_z
+            view3d.view_rotation = euler.to_quaternion()
+        #缩放
+        zoom_speed = settings.zoom_speed
+        if gamepad_state.buttons.get('BTN_TL'):
+            view3d.view_distance += zoom_speed
+        if gamepad_state.lb:
+            view3d.view_distance -= zoom_speed
+    
+    # 笔刷
+    def handle_button_brush(self, context):
+        if context.mode == 'SCULPT':
+            brush=context.tool_settings.sculpt.brush
+            # if gamepad_state.button_states.get('BTN_TR')==1:
+                # gamepad_state.button_states['BTN_TR']=0
+            if gamepad_state.rb:
+                if brush.direction=='ADD':
+                    brush.direction='SUBTRACT'
+                else:
+                    brush.direction='ADD'
+                time.sleep(0.2)
+                return
+        elif context.mode=='PAINT_TEXTURE':
+            brush=context.tool_settings.image_paint.brush
+            # if gamepad_state.button_states.get('BTN_TR')==1:
+                # gamepad_state.button_states['BTN_TR']=0
+            if gamepad_state.rb:
+                if brush.blend=="MIX":
+                    brush.blend="ERASE_ALPHA"
+                else:
+                    brush.blend="MIX"
+                time.sleep(0.2)
+                return
+        elif context.mode=='PAINT_WEIGHT':
+            brush=context.tool_settings.weight_paint.brush
+        elif context.mode=='PAINT_VERTEX':
+            brush=context.tool_settings.vertex_paint.brush
+        
+        if gamepad_state.button_states.get('BTN_TR')==1:
+            x,y=get_mouse_position()
+            color=get_pixel_color_win(x,y)
+            context.tool_settings.unified_paint_settings.color=(color[0]/255,color[1]/255,color[2]/255)
+            gamepad_state.button_states['BTN_TR']=0
+            
+        unified_brush=context.tool_settings.unified_paint_settings
+        if gamepad_state.button_states.get('BTN_WEST') == 1:# Y
+            # gamepad_state.button_states['BTN_WEST'] = 0
+            # if brush:
+            #     brush.size = max(1,int(brush.size*0.99))
+            # else:
+            unified_brush.size = max(1,int(unified_brush.size*0.99))
+        if gamepad_state.button_states.get('BTN_EAST') == 1:# A
+            # gamepad_state.button_states['BTN_EAST'] = 0
+            if brush:
+                brush.strength=min(1.0,brush.strength+0.01)
+            else:
+                unified_brush.strength=min(1.0,unified_brush.strength+0.01)
+        if gamepad_state.button_states.get('BTN_NORTH') == 1:# X
+            # gamepad_state.button_states['BTN_NORTH'] = 0
+            # if brush:
+            #     brush.size=min(500,math.ceil(brush.size * 1.01))
+            # else:
+            unified_brush.size=min(500,math.ceil(unified_brush.size * 1.01))
+        if gamepad_state.button_states.get('BTN_SOUTH') == 1:# B
+            # gamepad_state.button_states['BTN_SOUTH'] = 
+            if brush:
+                brush.strength=max(0.0,brush.strength-0.01)
+            else:
+                unified_brush.strength=max(0.0,unified_brush.strength-0.01)
+
+    # redo undo
     def handle_button_actions(self, context):
-        if gamepad_state.button_states.get('BTN_WEST') == 1:
-            self.simulate_keypress(context, 'Z', ctrl=True)
-            gamepad_state.button_states['BTN_WEST'] = 0
+        if gamepad_state.buttons.get('BTN_SELECT')==1:
+            try:
+                bpy.ops.ed.redo()
+            except Exception as err:
+                self.report({'INFO'}, "redo fail")
+            time.sleep(0.2)
+            gamepad_state.button_states['BTN_SELECT']=0
+        elif gamepad_state.buttons.get('BTN_START')==1:
+            try:
+                bpy.ops.ed.undo()
+            except Exception as err:
+                self.report({'INFO'}, "undo fail")
+            time.sleep(0.2)
+            gamepad_state.button_states['BTN_START']=0
 
-        if gamepad_state.button_states.get('BTN_NORTH') == 1:
-            self.simulate_keypress(context, 'Z', ctrl=True, shift=True)
-            gamepad_state.button_states['BTN_NORTH'] = 0
-
+    # 视角回正
     def handle_dpad_view_switch(self, context):
+        if gamepad_state.button_states.get('BTN_THUMBL')==1:
+            # bpy.ops.view3d.view_selected()
+            # focus_view_to_origin()
+            bpy.ops.view3d.view_axis(type='FRONT')
+            gamepad_state.button_states['BTN_THUMBL']=0
+            time.sleep(0.2)
+
         if gamepad_state.dpad_up == 1:
-            bpy.ops.view3d.view_axis(type='TOP')
+            bpy.ops.view3d.view_axis(type='RIGHT')
             gamepad_state.dpad_up = 0
 
         if gamepad_state.dpad_down == 1:
-            bpy.ops.view3d.view_axis(type='FRONT')
+            bpy.ops.view3d.view_axis(type='LEFT')
             gamepad_state.dpad_down = 0
 
         if gamepad_state.dpad_left == 1:
-            bpy.ops.view3d.view_axis(type='LEFT')
+            bpy.ops.view3d.view_axis(type='TOP')
             gamepad_state.dpad_left = 0
 
         if gamepad_state.dpad_right == 1:
-            bpy.ops.view3d.view_axis(type='RIGHT')
+            bpy.ops.view3d.view_axis(type='FRONT')
             gamepad_state.dpad_right = 0
 
-    def simulate_keypress(self, context, key, ctrl=False, shift=False, alt=False):
-        try:
-            if key == 'Z' and ctrl and not shift and not alt:
-                bpy.ops.ed.undo()
-            elif key == 'Z' and ctrl and shift and not alt:
-                bpy.ops.ed.redo()
-        except Exception as e:
-            if 'undo' in str(e).lower():
-                self.report({'INFO'}, "没有可以撤销的操作")
-            elif 'redo' in str(e).lower():
-                self.report({'INFO'}, "没有可以重做的操作")
-            else:
-                self.report({'WARNING'}, f"操作失败: {str(e)}")
-
     def execute(self, context):
+        print('[gamepad] OT execute')
         if context.area.type != 'VIEW_3D':
             self.report({'WARNING'}, "激活区域必须是3D视图")
             return {'CANCELLED'}
-
         # 重置手柄状态
         global gamepad_state
         gamepad_state = GamepadState()
-
         # 开始新线程
         self._thread = GamepadThread()
         self._thread.start()
-
         # 设置计时器
         wm = context.window_manager
         self._timer = wm.event_timer_add(1 / 60, window=context.window)
         wm.modal_handler_add(self)
-
         return {'RUNNING_MODAL'}
 
     def cancel(self, context):
+        print('[gamepad] OT cancel')
         if self._timer:
             context.window_manager.event_timer_remove(self._timer)
         if self._thread:
             self._thread.running = False
             self._thread.join(timeout=1.0)  # 添加超时
-
         # 重置手柄状态
         global gamepad_state
         gamepad_state = GamepadState()
@@ -433,13 +469,6 @@ class GAMEPAD_PT_panel(Panel):
     def poll(cls, context):
         return context.area.type == 'VIEW_3D'
 
-    def check_inputs_package(self):
-        try:
-            import inputs
-            return True
-        except ImportError:
-            return False
-
     def draw(self, context):
         layout = self.layout
         settings = context.scene.gamepad_settings
@@ -447,14 +476,6 @@ class GAMEPAD_PT_panel(Panel):
         box = layout.box()
         row = box.row()
         row.prop(settings, "enable_gamepad_control")
-
-        # 检查 inputs 包是否安装
-        inputs_available = self.check_inputs_package()
-
-        if not inputs_available:
-            box.label(text="请安装 'inputs' 包", icon='ERROR')
-            box.label(text="pip install inputs", icon='CONSOLE')
-            return
 
         # 如果 inputs 包已安装，显示其他设置
         if settings.enable_gamepad_control:
@@ -464,84 +485,25 @@ class GAMEPAD_PT_panel(Panel):
             box.prop(settings, "rotation_speed")
             box.prop(settings, "zoom_speed")
 
-            box = layout.box()
-            box.label(text="物体控制设置:", icon='OBJECT_DATA')
-            box.prop(settings, "scale_speed")
-            box.prop(settings, "move_speed")
-            box.prop(settings, "object_rotation_speed")
-
-            box = layout.box()
-            box.label(text="轴向设置:", icon='ORIENTATION_GIMBAL')
-            box.prop(settings, "invert_x_axis")
-            box.prop(settings, "invert_y_axis")
-            box.prop(settings, "invert_z_axis")
-
             # 添加控制说明
             help_box = layout.box()
             help_box.label(text="控制说明:", icon='HELP')
             col = help_box.column(align=True)
-            col.label(text="左摇杆: 平移/物体移动")
-            col.label(text="右摇杆: 旋转")
-            col.label(text="A键(BTN_SOUTH): 放大/缩小")
-            col.label(text="B键(BTN_EAST): 缩小/放大")
-            col.label(text="X键(BTN_WEST): 撤销")
-            col.label(text="Y键(BTN_NORTH): 重做")
-            col.label(text="方向键: 切换视图")
+            col.label(text="F5: 打开")
+            col.label(text="右摇杆: 平移 左摇杆: 旋转")
+            col.label(text="L/L2: 缩小/放大 R:取色 R2:橡皮")
+            col.label(text="方向键: 切换视图 -:undo +:redo")
+            col.label(text="brush XY:size AB:strength")
 
-classes = (
-    GamepadSettings,
-    GAMEPAD_OT_control,
-    GAMEPAD_PT_panel,
-)
+class GAMEPAD_Start(bpy.types.Operator):
+    bl_idname = "gamepad.start"
+    bl_label = "GamePad Start"
+    bl_description = "开启Gamepad控制"
+    bl_options = {'REGISTER', 'UNDO'}
 
+    def execute(self, context):
+        self.report({'INFO'}, "已开启Gamepad控制")
+        settings = context.scene.gamepad_settings
+        settings.enable_gamepad_control=True
+        return {'FINISHED'}
 
-def safe_register():
-    """安全注册所有类"""
-    try:
-        # 注册属性组
-        if not hasattr(bpy.types.Scene, "gamepad_settings"):
-            bpy.utils.register_class(GamepadSettings)
-            bpy.types.Scene.gamepad_settings = PointerProperty(type=GamepadSettings)
-
-        # 注册操作器和面板
-        bpy.utils.register_class(GAMEPAD_OT_control)
-        bpy.utils.register_class(GAMEPAD_PT_panel)
-
-        return True
-    except Exception as e:
-        print(f"游戏手柄插件注册失败: {str(e)}")
-        return False
-
-
-def safe_unregister():
-    """安全注销所有类"""
-    try:
-        # 注销操作器和面板
-        bpy.utils.unregister_class(GAMEPAD_PT_panel)
-        bpy.utils.unregister_class(GAMEPAD_OT_control)
-
-        # 注销属性组
-        if hasattr(bpy.types.Scene, "gamepad_settings"):
-            bpy.utils.unregister_class(GamepadSettings)
-            del bpy.types.Scene.gamepad_settings
-
-    except Exception as e:
-        print(f"游戏手柄插件注销失败: {str(e)}")
-
-
-def register():
-    """插件注册入口点"""
-    if not safe_register():
-        # 如果注册失败，确保完全清理
-        safe_unregister()
-        return {'CANCELLED'}
-    return {'FINISHED'}
-
-
-def unregister():
-    """插件注销入口点"""
-    safe_unregister()
-
-
-if __name__ == "__main__":
-    register()
