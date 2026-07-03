@@ -4,6 +4,8 @@
 
 2026 by DKZ
 
+![tutorial](./BlenderGamepadControls.png)
+
 fork from [OhMyKing/Blender-Gamepad-Controls](https://github.com/OhMyKing/Blender-Gamepad-Controls) 重新映射按键功能以适应雕刻和纹理绘制工作流.  
 内置 [zeth/inputs](https://github.com/zeth/inputs/tree/master) 包,直接下载zip包开箱即用.
 
